@@ -1,5 +1,6 @@
 import Foundation
 import Capacitor
+import Adyen 
 
 /**
  * Please read the Capacitor iOS Plugin Development Guide
@@ -16,195 +17,69 @@ public class AdyenPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "requestGooglePayment", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "requestApplePayment", returnType: CAPPluginReturnPromise)
     ]
-    private let implementation = Adyen()
-    private var clientKey: String = ""
-    private var merchantAccount: String = ""
-    private var environment: Adyen.Environment = .test
-    private var countryCode: String = "US"
-    private var amount: Adyen.Amount = Adyen.Amount(value: 0, currencyCode: "USD")
-    private var merchantName: String = ""
-    private var merchantIdentifier: String = ""
-    private var dropInComponent: DropInComponent?
+
+    // Use lazy var for implementation to ensure bridge is available if needed later
+    private lazy var implementation = Adyen(plugin: self)
+    private var applePayCallbackId: String? // Keep track of the specific callback
+
+    override public func load() {
+        // You might perform early setup here if needed,
+        // but initialization based on JS call is usually preferred.
+        implementation.plugin = self // Ensure the plugin reference is set
+    }
 
     @objc func initialize(_ call: CAPPluginCall) {
-        let envString = call.getString("environment", "TEST")
-        self.environment = envString == "TEST" ? .test : .live
-        
-        guard let merchantAccount = call.getString("merchantAccount") else {
-            call.reject("Missing merchantAccount")
-            return
-        }
-        self.merchantAccount = merchantAccount
-        
-        guard let clientKey = call.getString("clientKey") else {
-            call.reject("Missing clientKey")
-            return
-        }
-        self.clientKey = clientKey
-        
-        self.countryCode = call.getString("countryCode", "US")
-        self.merchantName = call.getString("merchantName", "")
-        self.merchantIdentifier = call.getString("merchantIdentifier", "")
-        
-        if let amountObj = call.getObject("amount") {
-            let currency = amountObj["currency"] as? String ?? "USD"
-            let value = amountObj["value"] as? Int ?? 0
-            self.amount = Adyen.Amount(value: value, currencyCode: currency)
-        }
-        
-        call.resolve()
+        implementation.initialize(call)
     }
-    
-    @objc func isGooglePayAvailable(_ call: CAPPluginCall) {
-        // Not applicable on iOS, but we need to implement it
-        call.resolve([
-            "isAvailable": false
-        ])
-    }
-    
-    @objc func isApplePayAvailable(_ call: CAPPluginCall) {
-        let isAvailable = PKPaymentAuthorizationViewController.canMakePayments()
-        call.resolve([
-            "isAvailable": isAvailable
-        ])
-    }
-    
-    @objc func requestGooglePayment(_ call: CAPPluginCall) {
-        // Not applicable on iOS, but we need to implement it
-        call.reject("Google Pay is not available on iOS")
-    }
-    
-    @objc func requestApplePayment(_ call: CAPPluginCall) {
-        guard let totalPrice = call.getString("totalPrice") else {
-            call.reject("Missing totalPrice")
-            return
-        }
-        
-        let currencyCode = call.getString("currencyCode", "USD")
-        let merchantName = call.getString("merchantName", self.merchantName)
-        
-        // Create payment request
-        let applePayComponent = try? ApplePayComponent(
-            paymentMethod: ApplePayPaymentMethod(),
-            payment: Payment(
-                amount: amount,
-                countryCode: countryCode
-            ),
-            merchantIdentifier: merchantIdentifier
-        )
-        
-        guard let applePayComponent = applePayComponent else {
-            call.reject("Failed to initialize Apple Pay component")
-            return
-        }
-        
-        // Get summary items
-        var summaryItems: [PKPaymentSummaryItem] = []
-        if let items = call.getArray("summaryItems") as? [[String: Any]] {
-            for item in items {
-                guard let label = item["label"] as? String,
-                      let amountString = item["amount"] as? String,
-                      let amountValue = Double(amountString) else {
-                    continue
-                }
-                
-                let type: PKPaymentSummaryItemType = (item["type"] as? String == "pending") ? .pending : .final
-                let itemAmount = NSDecimalNumber(value: amountValue)
-                let summaryItem = PKPaymentSummaryItem(label: label, amount: itemAmount, type: type)
-                summaryItems.append(summaryItem)
-            }
-        }
-        
-        // Set default total if no summary items provided
-        if summaryItems.isEmpty {
-            let totalAmount = NSDecimalNumber(string: totalPrice)
-            let totalItem = PKPaymentSummaryItem(label: merchantName, amount: totalAmount, type: .final)
-            summaryItems.append(totalItem)
-        }
-        
-        // Configure Apple Pay
-        applePayComponent.summaryItems = summaryItems
-        
-        // Set merchant capabilities
-        var capabilities: PKMerchantCapability = .capability3DS
-        if let merchantCapabilities = call.getArray("merchantCapabilities") as? [String] {
-            for capability in merchantCapabilities {
-                if capability == "debit" {
-                    capabilities.insert(.debit)
-                } else if capability == "credit" {
-                    capabilities.insert(.credit)
-                }
-            }
-        }
-        applePayComponent.merchantCapabilities = capabilities
-        
-        // Set supported networks
-        if let supportedNetworks = call.getArray("supportedNetworks") as? [String] {
-            var networks: [PKPaymentNetwork] = []
-            
-            for network in supportedNetworks {
-                switch network.lowercased() {
-                case "visa":
-                    networks.append(.visa)
-                case "mastercard":
-                    networks.append(.masterCard)
-                case "amex":
-                    networks.append(.amex)
-                case "discover":
-                    networks.append(.discover)
-                default:
-                    break
-                }
-            }
-            
-            if !networks.isEmpty {
-                applePayComponent.supportedNetworks = networks
-            }
-        }
-        
-        // Set shipping and billing contact fields required
-        if call.getBool("shippingContact", false) {
-            applePayComponent.requiredShippingContactFields = [.postalAddress, .name, .phoneNumber, .emailAddress]
-        }
-        
-        if call.getBool("billingContact", false) {
-            applePayComponent.requiredBillingContactFields = [.postalAddress, .name]
-        }
-        
-        // Present Apple Pay
-        DispatchQueue.main.async {
-            applePayComponent.delegate = self
-            applePayComponent.viewController = self.bridge?.viewController
-            
-            applePayComponent.startPayment { [weak self] result, component in
-                guard let self = self else { return }
-                
-                switch result {
-                case .success(let result):
-                    let resultData: [String: Any] = [
-                        "success": true,
-                        "token": result.paymentMethod.encodedToken,
-                        "paymentData": result.paymentMethod.checkoutAttemptId ?? ""
-                    ]
-                    
-                    call.resolve(resultData as [AnyHashable : Any])
-                    
-                case .failure(let error):
-                    call.reject("Apple Pay error: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-}
 
-// MARK: - ApplePayComponentDelegate
-extension AdyenPlugin: ApplePayComponentDelegate {
-    public func didSubmit(_ applePayToken: PKPaymentToken, from component: ApplePayComponent, completion: @escaping (Bool) -> Void) {
-        // We just return true since we handle the token in the callback above
-        completion(true)
+    @objc func isGooglePayAvailable(_ call: CAPPluginCall) {
+        implementation.isGooglePayAvailable(call)
     }
-    
-    public func didFail(with error: Error, from component: ApplePayComponent) {
-        // Error is handled in the callback above
+
+    @objc func isApplePayAvailable(_ call: CAPPluginCall) {
+        implementation.isApplePayAvailable(call)
+    }
+
+    @objc func requestGooglePayment(_ call: CAPPluginCall) {
+        implementation.requestGooglePayment(call)
+    }
+
+    // We need to save the call to resolve it asynchronously later in the delegate
+    @objc func requestApplePayment(_ call: CAPPluginCall) {
+        self.applePayCallbackId = call.callbackId
+        call.save() // Use Capacitor's save/release mechanism
+        implementation.requestApplePayment(call, callbackId: call.callbackId)
+    }
+
+    // Helper to get the root view controller - essential for presenting UI
+    func getRootVC() -> UIViewController? {
+        var window: UIWindow? = UIApplication.shared.delegate?.window ?? nil
+
+        if window == nil {
+            let scene: UIWindowScene? = UIApplication.shared.connectedScenes.first as? UIWindowScene
+            window = scene?.windows.filter({$0.isKeyWindow}).first
+            if window == nil {
+                window = scene?.windows.first
+            }
+        }
+        return window?.rootViewController
+    }
+
+    // Method to resolve the saved Apple Pay call from the implementation
+    func resolveApplePayCall(_ result: JSObject) {
+        if let callbackId = self.applePayCallbackId, let call = bridge?.savedCall(withID: callbackId) {
+            call.resolve(result)
+            bridge?.releaseCall(call)
+            self.applePayCallbackId = nil
+        }
+    }
+
+    // Method to reject the saved Apple Pay call from the implementation
+    func rejectApplePayCall(_ message: String, _ error: Error? = nil) {
+        if let callbackId = self.applePayCallbackId, let call = bridge?.savedCall(withID: callbackId) {
+            call.reject(message, nil, error)
+            bridge?.releaseCall(call)
+            self.applePayCallbackId = nil
+        }
     }
 }
