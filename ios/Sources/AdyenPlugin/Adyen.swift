@@ -161,42 +161,57 @@ public struct AdyenCoder {
         let transactionMerchantName = call.getString("merchantName", self.merchantName)
 
         do {
+            print("Configuring Apple Pay Component...")
             // 3. Configure Apple Pay Component
             let summaryItems = [
                 PKPaymentSummaryItem(label: transactionMerchantName,
                                      amount: NSDecimalNumber(value: Double(transactionAmount.value) / 100.0)) // Apple Pay uses decimal amount
                 // Add more items like tax, discount, shipping if needed
             ]
+            print("Created summary items with amount: \(transactionAmount.value), merchant: \(transactionMerchantName)")
 
             // Use the Adyen.ApplePayPayment structure
              let applePayPayment = try ApplePayPayment(countryCode: adyenContext.payment?.countryCode ?? self.countryCode,
                                                       currencyCode: transactionAmount.currencyCode,
                                                       summaryItems: summaryItems)
+            print("Created ApplePayPayment with country: \(adyenContext.payment?.countryCode ?? self.countryCode), currency: \(transactionAmount.currencyCode)")
 
             let config = ApplePayComponent.Configuration(payment: applePayPayment,
                                                          merchantIdentifier: self.merchantIdentifier)
+            print("Created configuration with merchant ID: \(self.merchantIdentifier)")
             // Add required billing/shipping fields if needed:
             // config.requiredBillingContactFields = [.postalAddress]
             // config.requiredShippingContactFields = [.postalAddress, .phoneNumber, .emailAddress]
             // config.shippingMethods = [...] // Define PKShippingMethods if applicable
 
             // 4. Create and Present Apple Pay Component
+            print("Creating ApplePayComponent...")
             let component = try ApplePayComponent(paymentMethod: paymentMethod,
                                                   context: adyenContext,
                                                   configuration: config)
+            print("ApplePayComponent created successfully")
+            
             component.delegate = self // Handles final result (didSubmit/didFail)
+            print("Set component delegate")
+            
             // Set applePayDelegate ONLY if you need advanced features like shipping updates (iOS 15+)
             if #available(iOS 15.0, *) {
                  component.applePayDelegate = self // Handles dynamic updates during payment sheet interaction
+                 print("Set applePayDelegate for iOS 15+")
             }
             self.applePayComponent = component // Keep a reference
+            print("Stored component reference")
 
             // Present the Apple Pay sheet
             guard let rootVC = plugin?.getRootVC() else {
+                print("ERROR: Failed to get root view controller")
                 plugin?.rejectApplePayCall("Could not get Root ViewController to present Apple Pay.")
                 return
             }
+            print("Got root view controller successfully")
+            
             // Ensure presentation on main thread
+            print("Attempting to present Apple Pay sheet...")
             DispatchQueue.main.async {
                 rootVC.present(component.viewController, animated: true, completion: nil)
             }
@@ -224,9 +239,10 @@ extension Adyen: PaymentComponentDelegate {
 
         do {
             let detailsJson = try AdyenCoder.encode(applePayDetails)
+            let jsonString = String(data: try JSONSerialization.data(withJSONObject: detailsJson ?? [:]), encoding: .utf8) ?? "{}"
 
             var result = JSObject()
-            result["paymentData"] = detailsJson
+            result["paymentData"] = jsonString
             result["storePaymentMethod"] = data.storePaymentMethod
 
             self.plugin?.resolveApplePayCall(result)
